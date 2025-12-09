@@ -1,187 +1,262 @@
-import spacy # Es un modulo o libreria crucial para proyectos de este tipo, para usar en procesamiento de lenguaje natural
-# Es crucial para que el chatbot pueda entender de mejor manera lo que uno quiere decir y como lo interpreta
+import spacy
 import sqlite3
-import re # Es un modulo que se usa para buscar un patron de texto muy especifico como en este caso Ryzen, Core (Intel) o Geforce, tambien para usar en expresiones regulares
-from typing import Dict, Optional
+import re
+from typing import Dict, Optional, Tuple, Any
 
-pln = spacy.load("es_core_news_sm") # Se carga el modelo de PLN en español
+# Configuración
+DB_NAME = "pc_gamer.db"
 
-pc_db = "pc_gamer.db" # Variable que guarda el nombre de la base de datos
+# Cargar modelo de Spacy
+try:
+    nlp = spacy.load("es_core_news_sm")
+except OSError:
+    print("Error: Modelo de Spacy no encontrado. Ejecuta: python -m spacy download es_core_news_sm")
+    exit()
 
-def conectar_db(db_nombre="pc_gamer.db"):
-    conexion = sqlite3.connect(db_nombre)
-    return conexion
+def obtener_conexion():
+    """Retorna una conexión a la base de datos."""
+    return sqlite3.connect(DB_NAME)
 
-# Esta funcion analizara la pregunta del usuario para extraer nombres especificos como modelos y requisitos
-# pregunta: str indica que pregunta debe ser string
-# -> Dict[str, Optional[str]]: indica que la funcion debe devolver un diccionario donde las llaves son cadenas "str" y los valores son cadenas "str" o "None" debido a Optional
-def analisis_pregunta(pregunta: str) -> Dict[str, Optional[str]]:
-    doc = pln(pregunta.lower()) # La variable doc contiene la pregunta o palabra del usuario ya procesada anteriormente
-
-# Identifica el tipo de componente, modelo y uso, None indica que no hay ningun valor asignado en el momento en el que se escribe    
-# Al iniciar con { (diccionario), indica que al comenzar el analisis de la pregunta, todavia no sabes que busca el usuario con respecto al uso, componente o modelo
-# En otras palabras, al iniciar con None indicamos que la funcion analisis_pregunta llene esos espacios a medida que procesa la frase del usuario
+def analisis_pregunta(pregunta: str) -> Dict[str, Any]:
+    """
+    Analiza la intención del usuario. Detecta componentes, modelos específicos,
+    intenciones de upgrade y casos de uso.
+    """
+    doc = nlp(pregunta.lower())
+    
     requerimientos = {
-    "tipo_componente": None,
-    "modelo_especifico": None,
-    "uso": None
-}
+        "tipo_componente_buscado": None, # Qué quiere el usuario
+        "modelos_mencionados": [],       # Qué tiene el usuario (para compatibilidad)
+        "uso": None,                     # Gaming, Edición, etc.
+        "intencion_upgrade": False       # Si usa palabras como "mejorar", "upgrade"
+    }
 
-# token o Tokenizacion: divide el texto en tokens, que son unidades individuales de un texto
-# Puede estar basada en palabras completas ejemplo (casa, perro) o caracteres individuales en los que cada caracter es un token (a,b,7,$)
-# Tambien basada en sub-palabras como automovil -> auto, movil
+    # 1. Palabras clave de intención
+    if any(token.text in ["mejorar", "upgrade", "actualizar", "potenciar"] for token in doc):
+        requerimientos["intencion_upgrade"] = True
+
+    # 2. Detección de Componentes
     for token in doc:
-    # El chatbot identifica los tipos de componentes
-        if "cpu" in token.text or "procesador" in token.text:
-            requerimientos["tipo_componente"] = 'Cpu'
-        elif "gpu" in token.text or "grafica" in token.text or "tarjeta" in token.text:
-            requerimientos["tipo_componente"] = 'Gpu'
-        elif "ram" in token.text or "memoria" in token.text:
-            requerimientos["tipo_componente"] = 'Ram'
-        # El chatbot identifica el uso que le dara el usuario
-        if "gaming" in token.text or "jugar" in token.text:
-            requerimientos["uso"] = 'Gaming'
-        elif "edicion" in token.text or "render" in token.text or "trabajar" in token.text:
+        txt = token.text.lower()
+        if txt in ["cpu", "procesador"]:
+            requerimientos["tipo_componente_buscado"] = 'Cpu'
+        elif txt in ["gpu", "grafica", "gráfica", "video"]:
+            requerimientos["tipo_componente_buscado"] = 'Gpu'
+        elif txt in ["ram", "memoria"]:
+            requerimientos["tipo_componente_buscado"] = 'Ram'
+        elif txt in ["placa", "motherboard", "madre"]:
+            requerimientos["tipo_componente_buscado"] = "PlacaMadre"
+        elif txt in ["fuente", "psu"]:
+            requerimientos["tipo_componente_buscado"] = "FuentePoder"
+        
+        # Detección de uso
+        if txt in ["gaming", "jugar"]:
+            requerimientos["uso"] = 'Gaming 1080p' # Default
+        elif txt in ["edicion", "edición", "diseño", "render", "trabajo"]:
             requerimientos["uso"] = "Edición"
 
-                            #  Es un patron de busqueda para identificar de forma automatica nombres de modelos o componentes dentro de la pregunta del usuario
-                            # () define un grupo de captura de palabras, el | tambien llamado O/o permite que el patron coincida con el patron dentro de ()
-                            # i/d busca patrones similares entre si como i7 o i5, /s* busca espacios en blanco, [] define un conjunto de caracteres permitidos
-                            # /d hace que la busqueda coincida con cualquier digito 0-9, /s coincide con espacios en blanco, + indica que debe haber uno o mas digitos o espacios
-                            # En otras palabras es un filtro para escanear la pregunta del usuario buscando las palabras en la base de datos
-    patron_especificio_modelo = r'(ryzen|core|i\d|rtx|rx)\s*[\d\s]+[xmgti]?'
+    if "4k" in pregunta.lower():
+        requerimientos["uso"] = "Gaming 4K"
 
-    # Aqui se usa el patron anterior, que intenta encontrar el patron de marca y numero ejemplo rtx 4080, i7 en la pregunta del usuario
-    # Si se encuentra el patron, la variable match contendra el texto marcado pero si no encuentra nada, sera None
-    # Como se menciono casi al principio, re es un modulo o libreria que busca patrones muy especificos y search busca lo busca dentro de patron_especifico_modelo
-    coincidencia = re.search(patron_especificio_modelo, pregunta.lower())
-    # Si el patron anterior lo encuentra, se comenzaran a ejecutar las siguientes condiciones
-    if coincidencia:
-        for ent in doc.ents: # ent viene de entidad, por cada entidad en doc que viene de documentos, doc.ents es una lista de entidades nombradas que spacy detecto
-            if ent.label_ == "producto" or ent.label_ == "organizacion" or ent.label_ == "persona": # ent.label_ busca si la o las entidades son un producto, organizacion o persona, estos son los que nombres que spacy suele asignar a los nombres de hardware
-                if coincidencia.group(0) in ent.text.lower(): # Por cada entidad o coincidencia englobada en un grupo es 0, agarrara las entidades y textos y los hara minuscula
-                    requerimientos["modelo_especifico"] = ent.text.strip() # Si la entidad completa por ejemplo es AMD Ryzen 5 7600X pero la expresion regular (re) solo encuentra Ryzen 5, se captura la entidad completa para tener el nombre mas limpio y completo
-                    
-
-        if not requerimientos["modelo_especifico"]: # Si no se pudo encontrar la entidad completa pero la expresion regular si encontro un patron, lo usamos en coincidencia.group(0). Es como un respaldo
-            requerimientos["modelo_especifico"] = coincidencia.group(0) .strip()
-
-    # Revisamos si pregunta contiene 1080p o 4k para definir su uso al usuario    
-    if "1080p" in pregunta.lower():
-        requerimientos["uso"] = "1080p" 
-    elif "4k" in pregunta.lower():
-        requerimientos["uso"] = "4k"
-    return requerimientos # Es el paso que traduce la intencion del usuario del lenguaje humano a un conjunto de datos procesables por la base de datos
-
-# Se conecta la base de datos donde estan todos los campos
-def compatibilidad_db(conexion: sqlite3.Connection, actual_modelo: str) -> Optional[Dict[str, str]]:
+    # 3. Extracción de Modelos (Regex + Spacy Entities)
+    # Detectamos cualquier modelo mencionado (puede haber más de uno, ej: CPU y GPU para calcular PSU)
+    patron_modelo = r'\b(ryzen|core|i\d|rtx|geforce|radeon|gtx)\s*[\d]+[a-z0-9]*(-[a-z0-9]+)?\b'
+    coincidencias = re.finditer(patron_modelo, pregunta.lower())
     
-    cursordb = conexion.cursor()
+    for match in coincidencias:
+        modelo_raw = match.group(0)
+        # Limpieza básica
+        requerimientos["modelos_mencionados"].append(modelo_raw.strip())
 
-    cursordb.execute(''' SELECT socket, tipo_ram FROM componentesPC
-                     WHERE modelo LIKE ? ''', (''%'' + actual_modelo + ''%'' ,)) # Buscamos el componente por su modelo, LIKE hara busquedas parciales ejemplo Ryzen 5 a Ryzen 5 7600X
-                                                                                 # Tambien busca un socket y tipo de ram de un componente ya existente para recomendarle al usuario una mejora
+    return requerimientos
+
+def obtener_datos_componente(cursor: sqlite3.Cursor, modelo_parcial: str) -> Optional[Tuple]:
+    """Busca un componente y devuelve todos sus datos técnicos."""
+    sql = """SELECT id, tipo, modelo, precio, socket, tipo_ram, potencia_w 
+             FROM componentesPC WHERE modelo LIKE ? LIMIT 1"""
+    cursor.execute(sql, (f'%{modelo_parcial}%',))
+    return cursor.fetchone()
+
+def recomendar_componente_por_contexto(cursor: sqlite3.Cursor, tipo_comp: str, uso: str) -> str:
+    """
+    Mejora Lógica Builds: Sugiere un componente individual basado en el uso,
+    extrayéndolo de una Build probada.
+    """
+    columna_map = {
+        'Cpu': 'cpu_id', 'Gpu': 'gpu_id', 'PlacaMadre': 'placa_madre_id',
+        'Ram': 'ram_id', 'FuentePoder': 'fuente_poder_id'
+    }
     
-    resultado = cursordb.fetchone() # Fetchone es un metodo del objeto cursor que se usa despues de ejecutar una consulta SQL, lee y recupera la siguiente fila de resultados de la consulta
-    # Ya que la consulta esta diseñada para obtener un solo componente por modelo (socket y tipo_ram), fetchone traera esas filas unicas de datos 
+    if tipo_comp not in columna_map:
+        return "Lo siento, no puedo recomendar ese tipo de componente por contexto."
 
-    if resultado: # Si la consulta SQL anterior tuvo exito, entonces resultado sera una tupla ejemplo AM5 o DDR5, al ser una tupla la informacion se accede por indice
-        return {'socket': resultado[0], 'tipo_ram': resultado[1]} # socket es resultado0 y tipo_ram resultado1, toma los valores de la tupla y los empaqueta en un diccionario 
-    return None # Si la consulta fallo, se salta el if anterior junto con el return, regresa None al no encontrar compatibilidad para un modelo especifico, por lo que el chatbot dira algo como que no encontro nada
+    # Buscamos una build que coincida con el uso sugerido (usando LIKE para flexibilidad)
+    sql_build = f"""
+        SELECT c.modelo, c.precio 
+        FROM construccionPC b
+        JOIN componentesPC c ON b.{columna_map[tipo_comp]} = c.id
+        WHERE b.uso_sugerido LIKE ? OR b.nombre LIKE ?
+        LIMIT 1
+    """
+    param = f'%{uso}%'
+    cursor.execute(sql_build, (param, param))
+    res = cursor.fetchone()
+    
+    if res:
+        return f"Para uso de {uso}, te recomiendo: {res[0]} (${res[1]:.2f}), usado en nuestros ensambles especializados."
+    return f"No encontré una recomendación específica de {tipo_comp} para {uso}."
 
-def recomendacion_db(conexion: sqlite3.Connection, requerimientos: Dict[str, Optional[str]]) -> str:
-# Genera una consulta SQL para recomendar el mejor componente basado en los requerimientos PLN.
-    tipo = requerimientos.get("tipo_componente")
-    uso = requerimientos.get("uso")
-    actual_modelo = requerimientos.get("modelo_especifico")
-    # 1Actualizacion de componente especifico (Recomendacion de Compatibilidad)
-    if actual_modelo and tipo in ('Cpu', 'Gpu', 'Ram'): # Se asegura que el usuario haya mencionado un componente de hardware existente, tambien se ejecuta solo cuando la funcion analisis pregunta haya identificado un modelo especifico
-        compatibilidad = compatibilidad_db(conexion, actual_modelo) # Llama a la funcion y esta va a la base de datos y busca el actual modelo y devuelve el socket y su tipo de ram
+def calcular_psu_requerida(cursor: sqlite3.Cursor, modelos: list) -> str:
+    """
+    Mejora PSU: Calcula potencia basada en CPU + GPU + Margen.
+    """
+    potencia_total = 0
+    componentes_encontrados = []
+    
+    for mod in modelos:
+        datos = obtener_datos_componente(cursor, mod)
+        if datos:
+            # datos[6] es potencia_w
+            potencia_total += datos[6]
+            componentes_encontrados.append(f"{datos[2]} ({datos[6]}W)")
+    
+    if potencia_total == 0:
+        return "Necesito saber qué CPU y GPU tienes para calcular la fuente (ej: 'Fuente para Ryzen 5600 y RTX 3060')."
 
-        if not compatibilidad: # Si la funcion anterior no se cumple, termina la recomendacion 
-            return f"No encuentro detalles de compatibilidad del componente '{actual_modelo}' en la base de datos."
+    # Margen de seguridad estricto (150W - 200W)
+    margen = 200
+    meta_w = potencia_total + margen
+    
+    cursor.execute("SELECT modelo, precio, potencia_w FROM componentesPC WHERE tipo='FuentePoder' AND potencia_w >= ? ORDER BY precio ASC LIMIT 1", (meta_w,))
+    psu = cursor.fetchone()
+    
+    info_consumo = " + ".join(componentes_encontrados)
+    if psu:
+        return f"Consumo estimado: {potencia_total}W ({info_consumo}). Con margen de seguridad ({margen}W), necesitas ~{meta_w}W. Te recomiendo: {psu[0]} (${psu[1]:.2f})."
+    else:
+        return f"Consumo estimado alto ({potencia_total}W). Busca una fuente de más de {meta_w}W."
 
-        if tipo == 'Cpu': # Al usuario preguntar por Cpu, necesitara una placa madre compatible con su socket
-            sql_consulta = f"""
-                                SELECT modelo, precio, socket FROM componentesPC
-                                WHERE tipo = 'PlacaMadre' AND socket = ? 
-                                ORDER BY precio DESC LIMIT 1
-                           """
-            cursordb = conexion.cursor()
-            cursordb.execute(sql_consulta, (compatibilidad['socket'],))
-            resultado = cursordb.fetchone() # Intenta recuperar la placa madre mas potente y compatible
-            if resultado:                                                                                                                                  # El simbolo de la moneda y 1f te dira las decimales del precio      
-                return f"Debido a tu {actual_modelo} (socket {compatibilidad['socket']}), te recomiendo una Placa Madre compatible, como la {resultado[0]} por ${resultado[1]:.1f}."
-            return f"No encuentro Placa Madre compatibles con el socket {compatibilidad['socket']} de tu {actual_modelo}."
+def logica_upgrade_o_compatibilidad(cursor: sqlite3.Cursor, reqs: Dict) -> str:
+    """
+    Maneja la lógica compleja de compatibilidad estricta y upgrades.
+    """
+    modelos = reqs["modelos_mencionados"]
+    tipo_buscado = reqs["tipo_componente_buscado"]
+    es_upgrade = reqs["intencion_upgrade"]
+
+    if not modelos:
+        return "Por favor, especifica el modelo que tienes (ej: 'Ryzen 5 5600') para verificar compatibilidad."
+
+    # Tomamos el primer modelo mencionado como referencia principal
+    datos_actual = obtener_datos_componente(cursor, modelos[0])
+    if not datos_actual:
+        return f"No encontré el componente '{modelos[0]}' en mi base de datos."
+
+    tipo_actual = datos_actual[1]  # Cpu, Gpu, etc
+    socket_actual = datos_actual[4]
+    ram_actual = datos_actual[5]
+    potencia_actual = datos_actual[6]
+    precio_actual = datos_actual[3]
+
+    # --- CASO A: UPGRADE (Mejorar el MISMO componente) ---
+    if es_upgrade or (tipo_buscado and tipo_buscado == tipo_actual):
+        # Filtro: Debe ser compatible (mismo socket/tipo) Y ser "significativamente mejor"
+        # Definimos "mejor" como: Precio > 20% más alto O Potencia > 20% más alta (indicativo de rendimiento en este contexto simplificado)
         
-        elif tipo == 'Gpu':
-            sql_consulta = f"""
-                                SELECT modelo, precio FROM componentesPC
-                                WHERE tipo = 'Gpu'
-                                ORDER BY precio DESC LIMIT 1
-                            """
-            cursordb = conexion.cursor()
-            cursordb.execute(sql_consulta)
-            resultado = cursordb.fetchone()
-            if resultado:                                                                                                      
-                return f"Para mejorar tu {actual_modelo}, la mejor Gpu en venta es la {resultado[0]} por ${resultado[1]:.1f}."
-            return "No hay Gpus disponibles en mi base de datos para ti"
+        sql = """SELECT modelo, precio, potencia_w FROM componentesPC 
+                 WHERE tipo = ? AND socket = ? AND (precio > ? OR potencia_w > ?)
+                 ORDER BY precio DESC LIMIT 1"""
         
-        elif tipo == 'Ram':
-            sql_consulta = f"""
-                                SELECT modelo, precio FROM componentesPC
-                                WHERE tipo = 'Ram' AND tipo_ram = ?
-                                ORDER BY potencia_w DESC LIMIT 1
-                            """ 
-            cursordb = conexion.cursor()
-            cursordb.execute(sql_consulta, (compatibilidad['tipo_ram'],))
-            resultado = cursordb.fetchone()
-            if resultado:                                                                                                       
-                return f"Con tu {actual_modelo} ({compatibilidad['tipo_ram']}), te recomiendo una memoria Ram {resultado[0]} por ${resultado[1]:.1f}."
-            return f"No pude encontrar Ram tipo {compatibilidad['tipo_ram']} disponible para ti"
-    # 2A partir de este punto, en base al uso que le dara al usuario, osea, si pone 4k, buscara lo mas caro para el        
-    elif uso: # Si pone 1080p o Gaming o Edicion, buscara algo mas economico o equilibrado
-        if uso == '4K':
-            sql_consulta = "SELECT nombre, estimacion_minima FROM construccionPC ORDER BY estimacion_minima DESC LIMIT 1"
-        elif uso == '1080p' or uso == 'Gaming' or uso == 'Edición':
-            sql_consulta = "SELECT nombre, estimacion_minima FROM construccionPC ORDER BY estimacion_minima ASC LIMIT 1"
+        # Solo aplicamos filtro de socket si es CPU o Placa. Para GPU/RAM el socket es estándar, pero verificamos tipo de RAM si aplica.
+        params = [tipo_actual, socket_actual, precio_actual * 1.2, potencia_actual * 1.2]
+        
+        # Ajuste para RAM: debe coincidir el tipo_ram (DDR4/DDR5)
+        if tipo_actual == 'Ram':
+            sql = """SELECT modelo, precio FROM componentesPC 
+                     WHERE tipo = 'Ram' AND tipo_ram = ? AND precio > ? 
+                     ORDER BY precio DESC LIMIT 1"""
+            params = [ram_actual, precio_actual * 1.2]
+
+        cursor.execute(sql, params)
+        res = cursor.fetchone()
+        
+        if res:
+            return f"🚀 Upgrade sugerido: Tu {datos_actual[2]} puede mejorarse con el {res[0]} (${res[1]}). Es una mejora significativa."
         else:
-            "SELECT nombre, estimacion_minima FROM construccionPC ORDER BY estimacion_minima LIMIT 1"
+            return f"Tu {datos_actual[2]} ya es tope de gama para su plataforma en mi base de datos o no tengo una mejora significativa registrada."
 
-        cursordb = conexion.cursor()
-        cursordb.execute(sql_consulta)
-        resultado = cursordb.fetchone()
+    # --- CASO B: COMPATIBILIDAD CRUZADA (Buscar pareja) ---
+    # 1. Tengo CPU -> Busco Placa Madre
+    if tipo_actual == 'Cpu' and (not tipo_buscado or tipo_buscado == 'PlacaMadre'):
+        # Estricto: Mismo Socket Y compatible con la RAM si la especificó (o general)
+        sql = "SELECT modelo, precio FROM componentesPC WHERE tipo='PlacaMadre' AND socket=? AND tipo_ram=? LIMIT 1"
+        cursor.execute(sql, (socket_actual, ram_actual)) # La CPU define qué RAM usa, la placa debe coincidir
+        res = cursor.fetchone()
+        if res:
+            return f"Para el procesador {datos_actual[2]} (Socket {socket_actual}/{ram_actual}), la placa ideal es {res[0]} (${res[1]})."
 
-        if resultado:
-            return f"Para un uso de {uso}, te recomiendo el emsamble {resultado[0]} con un costo aproximado o mayor de ${resultado[1]:.2f}, Esta build esta optimizada para el uso que le daras"
-        else:
-            return "No tengo ensambles diseñados para lo que exiges"
-        
-        
+    # 2. Tengo Placa Madre -> Busco CPU o RAM
+    elif tipo_actual == 'PlacaMadre':
+        if tipo_buscado == 'Ram':
+            sql = "SELECT modelo, precio FROM componentesPC WHERE tipo='Ram' AND tipo_ram=? LIMIT 1"
+            cursor.execute(sql, (ram_actual,))
+            res = cursor.fetchone()
+            if res:
+                return f"Tu placa usa {ram_actual}. Te recomiendo: **{res[0]}**."
+        else: # Default: Buscar CPU
+            sql = "SELECT modelo, precio FROM componentesPC WHERE tipo='Cpu' AND socket=? AND tipo_ram=? LIMIT 1"
+            cursor.execute(sql, (socket_actual, ram_actual))
+            res = cursor.fetchone()
+            if res:
+                return f"Para la placa {datos_actual[2]}, el procesador compatible es **{res[0]}** ({ram_actual})."
 
-def respuesta_botsito(pregunta: str) -> str: # Esta funcion es primordial ya que en ella se recibe la pregunta y regresa la respuesta
-    conexion = conectar_db()
-    if conexion is None:
-        return "No se pudo conectar a la base de datos, el que este leyendo esto, revisa el codigo para ver que falloxd"
-    requerimientos = analisis_pregunta(pregunta)
+    return "No estoy seguro de qué componente compatible buscas. Prueba especificando: 'Placa para Ryzen 5600'."
 
-    if requerimientos.get("tipo_componente") == 'None' and requerimientos.get("uso") == 'None':
-    # Si el Chatbot no encontro ningun componente y tampoco uso, devuelve el mensaje principal
-        return "Buenas, si quieres mejorar tu dispositivo, dime los componentes que buscas (Gpu, Cpu) o el uso que piensas darle (Gaming 1080p, Edicion, lo que sea)"
-# Llegados a este punto, __name__ sera el bloque principal por el cual se ejecutara el codigo, como en la base de datos
+def generar_respuesta(pregunta: str) -> str:
+    """Orquestador principal de la lógica."""
+    try:
+        with obtener_conexion() as conexion:
+            cursor = conexion.cursor()
+            reqs = analisis_pregunta(pregunta)
+            
+            tipo = reqs["tipo_componente_buscado"]
+            uso = reqs["uso"]
+            modelos = reqs["modelos_mencionados"]
+            
+            # Prioridad 1: Pregunta sobre Fuente de Poder con componentes específicos
+            if tipo == 'FuentePoder' and len(modelos) >= 1:
+                return calcular_psu_requerida(cursor, modelos)
+
+            # Prioridad 2: Pregunta por Upgrade o Compatibilidad (menciona modelo)
+            if modelos:
+                return logica_upgrade_o_compatibilidad(cursor, reqs)
+
+            # Prioridad 3: Pregunta Contextual (Componente + Uso)
+            # Ej: "Qué GPU me sirve para Edición"
+            if tipo and uso:
+                return recomendar_componente_por_contexto(cursor, tipo, uso)
+
+            # Prioridad 4: Recomendación de Build Completa (Solo uso)
+            if uso:
+                sql = "SELECT nombre, estimacion_minima FROM construccionPC WHERE uso_sugerido = ? OR nombre LIKE ? LIMIT 1"
+                cursor.execute(sql, (uso, f'%{uso}%'))
+                res = cursor.fetchone()
+                if res:
+                    return f"Para '{uso}', te recomiendo el ensamble completo: {res[0]} (~${res[1]:.2f})."
+                return "No tengo un ensamble específico para ese uso, pero el 'PC Gaming Calidad Precio' suele funcionar bien."
+
+            return "Hola. ¿En qué te ayudo? Puedes preguntar: 'Mejora para Ryzen 5600', 'GPU para Edición' o 'Fuente para RTX 3060 y Ryzen 5600'."
+
+    except sqlite3.Error as e:
+        return f"Error interno de base de datos: {e}"
+
 if __name__ == '__main__':
-    print ("🤖 Chatbot de recomendacion de componentes para tu PC para que ganes en tus jueguitos, si ya no quieres nada, escribe 'salir' ")
-    pln = spacy.load("es_core_news_sm")
-    print (f"Ha cargado el spacy: {pln.meta['name']}") 
-
-while True:
-        ingresar_usuario = input("Tu:")
-        if ingresar_usuario.lower() == 'salir':
+    print("🔧 BOT HARDWARE v2.0 INICIADO")
+    while True:
+        try:
+            user_input = input("\nTu: ")
+            if user_input.lower() in ['salir', 'exit']:
+                break
+            print(f"Bot: {generar_respuesta(user_input)}")
+        except KeyboardInterrupt:
             break
-        
-        # Aqui se llama a la logica completa del chatbot de la funcion respuesta_botsito y a raiz de ahi se obtiene la respuesta 
-        respuesta = respuesta_botsito(ingresar_usuario)
-        # Se muestra la respuesta del Chatbot al usuario
-        print (f"Chatbot: {respuesta}")
-
-             
